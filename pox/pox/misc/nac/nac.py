@@ -24,8 +24,8 @@ class nac (Observable):
         self.connection = connection
         self.transparent = transparent
         connection.addListeners(self)
-        self.nas= Nas(connection, transparent, "192.168.0.1")
-        self.L2=LearningSwitch(self.connection, None)
+        self.nas= Nas(connection, transparent)
+        self.L2=LearningSwitch(connection, transparent)
         self.add_observer(self.nas,'nac')
 
 
@@ -34,19 +34,25 @@ class nac (Observable):
         Handle packet in messages from the switch to implement above algorithm.
         """
         packet = event.parsed
+        
 
         #Premier paquet arrivant apres lauthentification
-        if self.nas.isAuthenticated(packet.src, event.port):
-            log.debug("%s est authentifie" %(packet.src))
-            self.L2.__handle_PacketIn(event)
+        if self.nas.isAuthenticated(packet.src, dpid_to_str(event.dpid),event.port):
+            if packet.type == 0x888e:
+                log.debug("paquet EAP recu de %s" %(packet.src))
+                self.notify_observers('nac',packet=packet, switch=dpid_to_str(event.dpid), port=event.port)
+            else:
+                log.debug("%s est authentifie" %(packet.src))
+                self.L2._handle_PacketIn(event)
             
         #Traitement des paquets EAP
         elif packet.type == 0x888e:
             log.debug("paquet EAP recu de %s" %(packet.src))
-            self.notify_observers('nac',packet=packet, port=event.port)
+            self.notify_observers('nac',packet=packet, switch=dpid_to_str(event.dpid), port=event.port)
             
         else:
-            self.notify_observers('nac',packet=packet, port=event.port)
+            log.debug("autre")
+            self.notify_observers('nac',packet=packet, switch=dpid_to_str(event.dpid), port=event.port)
 
 
 

@@ -43,17 +43,21 @@ class radius(packet_base):
         if eap_pckt.length>255:
             eap_attribute = eap_pckt.hdr()
             length_eap_attribute = eap_pckt.length
-            nb_eap_attribute = length_eap_attribute / 253
+            
+            #NB tour
+            tmp = length_eap_attribute / 253
+            nb_eap_attributes = tmp if (length_eap_attribute - tmp*253)==0 else tmp+1
+            
             actual_position = 0 
             
             for i in range(0,nb_eap_attributes):
                 max_position = min(actual_position +253 , length_eap_attribute)
-                length_attribute = actual_position + max_position +2
+                length_attribute = max_position +2 - actual_position
                 
                 self.attributes.append(struct.pack('!BB', 79, length_attribute) \
                                        + eap_attribute[actual_position:max_position])
                                        
-                actual_position += max_position +2
+                actual_position = max_position
                 self.length+= length_attribute
                                                                               
         else:
@@ -64,8 +68,11 @@ class radius(packet_base):
     def addAttribute(self, type, data):
         
         if isinstance(data, int):
+            data=str(data)
+            len_data = len(data)
+            """
             if data<65536:
-                self.length += 4
+                self.length += 6
                 self.attributes.append(struct.pack('!BBh', type, 4, data))
             elif data<4294967296:
                 self.length += 6
@@ -75,7 +82,7 @@ class radius(packet_base):
                 self.attributes.append(struct.pack('!BBq', type, 10, data))
                 
             return 
-                
+             """   
         elif isinstance(data, str):
             len_data = len(data)
                        
