@@ -22,7 +22,7 @@ class radius(packet_base):
 
         self.prev = prev
         self.code = 1
-        self.id = random.randint(1,256)
+        self.id = random.randint(1,255)
         self.length = 0
         self.authenticator = os.urandom(16)
 
@@ -174,7 +174,13 @@ class radius(packet_base):
             attrs+=attribute
         return attrs
     
-    
+    def getRawAttribute(self, type_attr):
+        for attribute in self.attributes:
+            type, length= struct.unpack('!BB', attribute[0:2])
+            
+            if type == type_attr:
+                return attribute
+            
     def getAttributeValue(self, type_attr):
         """
         Permet de receupérer un attribut EAP si disponible
