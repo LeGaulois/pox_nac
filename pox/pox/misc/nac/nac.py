@@ -5,11 +5,14 @@ from pox.lib.util import str_to_bool
 from pox.lib.packet.eap import eap
 from pox.lib.packet.eapol import eapol
 from pox.lib.packet.ethernet import ethernet
+from pox.lib.packet.dhcp import dhcp
 
 from pox.lib.addresses import EthAddr,IPAddr
 from forwarding.l2_learning import LearningSwitch
 from nas import Nas
 from observable import Observable
+from hosts_infos import HostsInfos
+from dhcp_interception import DhcpIntercept
 log = core.getLogger()
 
 
@@ -24,23 +27,36 @@ class nac (Observable):
         self.connection = connection
         self.transparent = transparent
         connection.addListeners(self)
-        self.nas= Nas(connection, transparent)
+        self.datas = HostsInfos()
+        self.nas= Nas(connection, transparent, self.datas)
         self.L2=LearningSwitch(connection, transparent)
         self.add_observer(self.nas,'nac')
+        self.dhcp_interceptor = DhcpIntercept(connection, transparent, self.datas)
+        self.add_observer(self.dhcp_interceptor,'dhcp')
 
 
     def _handle_PacketIn (self, event):
         """
         Handle packet in messages from the switch to implement above algorithm.
         """
+        
         packet = event.parsed
         
+        buffer_id = event.ofp.buffer_id
+        
+        if buffer_id is not None:
+            log.debug("Buffer id: %s" %(buffer_id))
 
-        #Premier paquet arrivant apres lauthentification
-        if self.nas.isAuthenticated(packet.src, dpid_to_str(event.dpid),event.port):
+
+        if self.datas.isAuthenticated(packet.src, dpid_to_str(event.dpid),event.port):
+            #For periodic-authentication or Log-off
             if packet.type == 0x888e:
                 log.debug("paquet EAP recu de %s" %(packet.src))
                 self.notify_observers('nac',packet=packet, switch=dpid_to_str(event.dpid), port=event.port)
+                
+            #For DHCP message
+            if isinstance(packet.next.next.next, dhcp):
+                self.notify_observers('dhcp', packet=packet, port=event.port)
             else:
                 log.debug("%s est authentifie" %(packet.src))
                 self.L2._handle_PacketIn(event)

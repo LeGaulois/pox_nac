@@ -11,6 +11,8 @@ from pox.lib.packet.radius import radius
 from pox.lib.packet.ethernet import ethernet
 import time
 from threading import Thread
+from tools import *
+from hosts_infos import HostsInfos
 
 log = core.getLogger()
 
@@ -44,7 +46,7 @@ class Nas(Observable,Thread):
     for 802.1x authentication
     """
 
-    def __init__(self, connection, transparent):
+    def __init__(self, connection, transparent, host_authenticated):
         Observable.__init__(self)
         Thread.__init__(self)
         self.radclient = radClient(rad_secret, rad_addr, rad_authport)
@@ -52,20 +54,8 @@ class Nas(Observable,Thread):
 
         self.connection = connection
         self.transparent = transparent
+        self.hosts_authenticated = host_authenticated
         
-        self.host_authenticated={}
-        #Permet de stocker la liste des adresses MAC authentifies
-        #{'aa:bb:cc:dd:ee:ff':
-        #   {
-        #       'user':'dupont', #internal-identity
-        #       'switch': mac_addr,
-        #       'port': 2,
-        #       'ip': 10.0.0.1,
-        #       'timestamp': <timestamp>, #Time before restart authentication
-        #       'count': 0 
-        #   }
-        #}
-
         self.host_progress={}
         #Permet de stocker la liste des machines en cours d'authentification
         #{'aa:bb:cc:dd:ee:ff':
@@ -96,7 +86,7 @@ class Nas(Observable,Thread):
         #Case where user is authenticated and send EAPoL Packet
         # 1) for close port (Type: Logoff)
         # 2) for periodic authentication
-        if self.isAuthenticated(paquet.src, switch, port):
+        if self.hosts_authenticated.isAuthenticated(paquet.src, switch, port):
             if isinstance(paquet.next, eapol):
                 #Case EAPoL-Logoff
                 if paquet.next.type==2:
@@ -127,13 +117,10 @@ class Nas(Observable,Thread):
             
             
     def getHostParams(self,mac_addr):
-        try:
-            mac=EthAddr(mac_addr)
-        except:
-            log.debug("Format d'adresse mac non valide")
+        mac_addr = checkMac(mac_addr)
             
-        if self.host_progress.has_key(mac):
-            return self.host_progress[mac]
+        if self.host_progress.has_key(mac_addr):
+            return self.host_progress[mac_addr]
         else:
             return None
             
@@ -150,6 +137,8 @@ class Nas(Observable,Thread):
         """
         
         
+        #If is EAP-RequestIdentity, we can get
+        #external identity
         if int(eap_pckt.type)==1:
             host_param['external-identity'] = str(eap_pckt.data)
             
@@ -189,14 +178,16 @@ class Nas(Observable,Thread):
             log.debug('ACCESS ACCEPT ;)')
             authenticated = host_param['authenticated']
             host_param['internal-identity']= rad.getAttributeValue(1)
+            host_param['ip'] = rad.getAttributeValue(8)
+            host_param['netmask'] = rad.getAttributeValue(9)
             
             self.deleteRunningSession(host_param['mac'])
             
-            ip_host = rad.getAttributeValue(8)
-            
             if not authenticated:
-                self.addAuthenticated(host_param['mac'], host_param['switch'],\
-                 host_param['port'], host_param['internal-identity'], ip_host)
+                self.hosts_authenticated.addAuthenticated(\
+                    host_param['mac'], host_param['switch'],\
+                    host_param['port'], host_param['internal-identity'],\
+                    host_param['ip'], host_param['netmask'])
                 
                 self.addFlowDHCP(host_param['mac'], host_param['port'])
             
@@ -204,7 +195,7 @@ class Nas(Observable,Thread):
             #for re-authenticate. If not, we need to destroy all existing
             #Flow tables    
             if authenticated:
-                param_auth = self.host_authenticated[host_param['mac']]
+                param_auth = self.hosts_authenticated.getInfos(host_param['mac'])
                 
                 if param_auth['user']!= host_param['internal-identity']:
                      log.debug('''Different internal-identity 
@@ -213,14 +204,18 @@ class Nas(Observable,Thread):
                      
                      self.deleteFlows(host_param['mac'])
                      self.addFlowDHCP(host_param['mac'], host_param['port'])
-                     self.host_authenticated[host_param['mac']]['user'] = \
-                            host_param['internal-identity']
+                     
+                     param_auth['user'] = host_param['internal-identity']
+                     self.hosts_authenticated.setInfos(host_param['mac'], \
+                                                param_auth)
                 
+            param_auth = self.hosts_authenticated.getInfos(host_param['mac'])
+                                                           
             #Set time to verifyIdentity of host
-            self.host_authenticated[host_param['mac']]['timestamp'] = \
-                int(time.time()) + INTERVALL * 60
-                
-            self.host_authenticated[host_param['mac']]['count'] = 0
+            param_auth['timestamp'] = int(time.time()) + INTERVALL * 60
+            param_auth['count'] = 0
+            self.hosts_authenticated.setInfos(host_param['mac'], \
+                                                param_auth)
                 
             attribute_eap = rad.getAttributeValue(79)
             self.sendEAP(host_param, None, attribute_eap)
@@ -267,12 +262,12 @@ class Nas(Observable,Thread):
         self.connection.send(msg)
             
         
-    
+    """
     def isAuthenticated(self,mac, switch, port):
-        """
+        ""
         Cette fonction permet de controler si une machine
         est identifiee sur le reseau
-        """
+        ""
         
         try:
             addr_mac=EthAddr(mac)
@@ -286,18 +281,17 @@ class Nas(Observable,Thread):
                 return True
             
         return False
+    """
 
-
-    def isRunningEAPSession(self,mac, switch, port):
+    def isRunningEAPSession(self,addr_mac, switch, port):
         """
         Permet de controler si une session EAP est en cours avec cette machine
         cad identification en cours
         """
         try:
-            addr_mac=EthAddr(mac)
-            switch = EthAddr(switch)
-        except RuntimeError:
-            log.debug("Mauvais format d'adresse MAC")
+            addr_mac = checkMac(addr_mac)
+            switch = checkMac(switch)
+        except:
             return False
 
         if self.host_progress.has_key(addr_mac):
@@ -308,11 +302,12 @@ class Nas(Observable,Thread):
         return False
 
 
+    """
     def addAuthenticated(self,mac,switch, port,user,ip=None):
-        """
+        ""
         Add user to authenticated array
         Remove user to progress_eap_session array
-        """
+        ""
         
         addr_mac=EthAddr(mac)
         switch = EthAddr(switch)
@@ -321,7 +316,7 @@ class Nas(Observable,Thread):
         
         self.host_authenticated[addr_mac]= {'user':user, 'switch': switch,\
                     'port':port, 'ip': addr_ip, 'count':0}
-
+    """
 
 
     def authenticatedToProgress(self,mac_addr):
@@ -330,20 +325,17 @@ class Nas(Observable,Thread):
         entry. Is usefull for periodic authentication
         """
         
-        try:
-            mac = EthAddr(mac_addr)
-        except:
-            raise ValueError("Bad MAC address format")
+        mac_addr = checkMac(mac_addr)
+        auth_dict = self.hosts_authenticated.getInfos(mac_addr)
         
-        if self.host_authenticated.has_key(mac):
-            auth_dict = self.host_authenticated[mac]
+        if auth_dict is not None:
             
-            self.host_progress[mac]={
+            self.host_progress[mac_addr]={
                 'internal-identity': auth_dict['user'],
                 'external-identity': None,
                 'switch': auth_dict['switch'],
                 'port': auth_dict['port'],
-                'mac':mac,
+                'mac':mac_addr,
                 'match':[],
                 'authenticated':True        
                 }
@@ -357,11 +349,8 @@ class Nas(Observable,Thread):
         retry authentication to check if is the same user who
         send packets
         """      
-        try:
-            mac_addr = EthAddr(mac_addr)
-            
-        except:
-            raise ValueError("Bad MAC address format")
+        
+        mac_addr = checkMac(mac_addr)
         
         self.authenticatedToProgress(mac_addr)
         port = self.host_progress[mac_addr]['port']
@@ -393,16 +382,16 @@ class Nas(Observable,Thread):
         
 
 
-    def startEAPSession(self, mac, switch, port):
+    def startEAPSession(self, mac_addr, switch, port):
         """
         Demarre letablissement dune session EAP:
             1) Ajout des flux pour bloquer tout le traffic,
                 excepte les trames EAP
             2) Demande a la machine son identite
         """
-        mac_addr=EthAddr(mac)
-        switch = EthAddr(switch)
-        port=int(port)
+        mac_addr = checkMac(mac_addr)
+        switch = checkMac(switch)
+        port = checkInt(port)
         
         self.host_progress[mac_addr]={
                     'switch': switch,
@@ -427,11 +416,8 @@ class Nas(Observable,Thread):
         Start EAP-SESSION after EAPOL-START
         """
         
-        if not isinstance(macaddr_dst, EthAddr):
-            raise ValueError("Invalid mac address format")
-        
-        if not isinstance(port_switch_dst, int):
-            raise ValueError("Invalid port format")
+        macaddr_dst = checkMac(macaddr_dst)
+        port_switch_dst = checkInt(port_switch_dst)
         
         #Requete EAPOL/EAP forgee
         eap_pckt = eap(code=1, type_name=1, id=1)
@@ -462,6 +448,9 @@ class Nas(Observable,Thread):
         1) Delete flows used for 802.1X authentication
         2) Delete host from host_progress
         """
+        
+        mac_addr = checkMac(mac_addr)
+        
         if self.host_progress.has_key(mac_addr):
             log.debug("suppresion des flux 802.1x pour %s" %(mac_addr))
             table_matching=self.host_progress[mac_addr]['match']
@@ -481,25 +470,18 @@ class Nas(Observable,Thread):
         
         Typicall use: receive EAPoL-Logoff
         """
-        try:
-            mac = EthAddr(mac)
-        except:
-            raise ValueError("Bad MAC Address format")
+
+        mac = checkMac(mac)
         
         if self.host_progress.has_key(mac):
             del self.host_progress[mac]
             
-        if self.host_authenticated.has_key(mac):
-            del self.host_authenticated[mac]
-            
-        self.deleteFlows(mac_addr)
+        self.hosts_authenticated.deleteEntry(mac)
+        self.deleteFlows(mac)
           
           
     def deleteFlows(self, mac_addr):
-        try:
-            mac_addr = EthAddr(mac_addr)
-        except:
-            raise ValueError("Bad MAC Address format")
+        mac_addr = checkMac(mac_addr)
              
         msg = of.ofp_flow_mod()
         msg.command = of.OFPFC_DELETE
@@ -520,8 +502,8 @@ class Nas(Observable,Thread):
         Add redirection for DHCP request
         to controller
         """
-        mac = EthAddr(mac)
-        port = int(port)
+        mac = checkMac(mac)
+        port = checkInt(port)
             
         #TODO: test
         #Add Flow for dhcp
@@ -532,8 +514,9 @@ class Nas(Observable,Thread):
         msg.match.dl_src = mac
         msg.match.nw_proto = 0x11
         msg.match.tp_src = 68
-        msg.match.tp_src = 67
+        msg.match.tp_dst = 67
         msg.buffer_id = None
+        msg._buffer_id = None
         action = of.ofp_action_output( port = of.OFPP_CONTROLLER )
         msg.actions.append(action)
         msg.priority = 100
@@ -545,6 +528,8 @@ class Nas(Observable,Thread):
         Cette fonction permet d ebloquer tout le traffic
         a destination d'une machine, excepte les flux EAP
         """
+        mac_addr = checkMac(mac_addr)
+        port = checkInt(port)
 
         #Bloque tout le traffic depuis et vers la machine concerne
         msg = of.ofp_flow_mod()
@@ -592,22 +577,27 @@ class Nas(Observable,Thread):
     def run(self):
         while True:
             now = int(time.time())
+            list_authenticated = self.hosts_authenticated.getAll()
             
-            for mac in self.host_authenticated.keys():
-                host_params = self.host_authenticated[mac]
+            
+            for mac in list_authenticated.keys():
+                host_params = list_authenticated[mac]
                 
                 if host_params['timestamp'] <= now:
                     #Increment counter and check if counter
                     # is > to MAX_RETRY
                     if host_params['count']+1 > MAX_RETRY:
+                        self.closeSession(mac)
                         log.debug("Echec de reauthentication")
                         
-                    self.host_authenticated[mac]['count'] +=1 
-                    host_params['timestamp'] = None
-                    thread =Thread(target= self.verifyIdentity \
+                    else:    
+                        host_params['count'] +=1 
+                        host_params['timestamp'] = None
+                        self.hosts_authenticated.setInfos(\
+                                mac, host_params)
+                        thread =Thread(target= self.verifyIdentity \
                             ,args=(mac,))
-                    thread.start()
-                    
+                        thread.start()
                     
             #Must not lower than minimum time
             #to perform authentication by radius server
